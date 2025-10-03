@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-compat.url = "github:ElvishJerricco/flake-compat/add-overrideInputs";
     poetry2nix = {
       url = "github:nix-community/poetry2nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,6 +15,7 @@
       self,
       nixpkgs,
       poetry2nix,
+      ...
     }:
     let
       system = "x86_64-linux";
