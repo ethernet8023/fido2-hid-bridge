@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-compat.url = "github:ElvishJerricco/flake-compat/add-overrideInputs";
     poetry2nix = {
       url = "github:nix-community/poetry2nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,6 +15,7 @@
       self,
       nixpkgs,
       poetry2nix,
+      ...
     }:
     let
       system = "x86_64-linux";
@@ -27,6 +29,8 @@
       packages.x86_64-linux = {
         fido2-hid-bridge = mkPoetryApplication {
           projectDir = self;
+          # skip projectDir cleaning default as that broke
+          src = self;
           overrides = defaultPoetryOverrides.extend (
             self: super: {
               uhid = super.uhid.overridePythonAttrs (old: {
