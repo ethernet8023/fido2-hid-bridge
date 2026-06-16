@@ -29,6 +29,8 @@
       packages.x86_64-linux = {
         fido2-hid-bridge = mkPoetryApplication {
           projectDir = self;
+          # skip projectDir cleaning default as that broke
+          src = self;
           overrides = defaultPoetryOverrides.extend (
             self: super: {
               uhid = super.uhid.overridePythonAttrs (old: {
