@@ -24,15 +24,25 @@ import time
 # Set up logging so we can see debug output
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
 
-from fido2_hid_bridge.backends import (
-    TcpRemoteBackend,
-    MSG_HELLO,
-    MSG_HELLO_ACK,
-    MSG_CTAP_REQUEST,
-    MSG_CTAP_RESPONSE,
-    MSG_NFC_STATUS,
-)
-from fido2_hid_bridge.ctap_hid_device import CTAPHIDDevice, CommandType, BROADCAST_CHANNEL
+# Check for /dev/uhid before importing the bridge (the uhid library
+# will fail at device creation time if /dev/uhid doesn't exist)
+UHID_AVAILABLE = os.path.exists("/dev/uhid")
+
+if UHID_AVAILABLE:
+    from fido2_hid_bridge.backends import (
+        TcpRemoteBackend,
+        MSG_HELLO,
+        MSG_HELLO_ACK,
+        MSG_CTAP_REQUEST,
+        MSG_CTAP_RESPONSE,
+        MSG_NFC_STATUS,
+    )
+    from fido2_hid_bridge.ctap_hid_device import CTAPHIDDevice, CommandType, BROADCAST_CHANNEL
+else:
+    print("UHID is not available (/dev/uhid is missing)")
+    print("Skipping uhid tests — try: sudo modprobe uhid")
+    print("VERIFICATION: SKIPPED (no /dev/uhid)")
+    sys.exit(0)
 
 PASS = 0
 FAIL = 0
