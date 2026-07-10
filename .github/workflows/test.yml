@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, feat/tcp-backend]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   # Non-root tests: TCP protocol, CLI parsing, module imports
