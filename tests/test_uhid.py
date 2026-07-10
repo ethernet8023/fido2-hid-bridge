@@ -25,8 +25,20 @@ import time
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
 
 # Check for /dev/uhid before importing the bridge (the uhid library
-# will fail at device creation time if /dev/uhid doesn't exist)
-UHID_AVAILABLE = os.path.exists("/dev/uhid")
+# will fail at device creation time if /dev/uhid doesn't exist or isn't accessible)
+def _uhid_accessible():
+    if not os.path.exists("/dev/uhid"):
+        return False
+    try:
+        fd = os.open("/dev/uhid", os.O_RDWR)
+        os.close(fd)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+UHID_AVAILABLE = _uhid_accessible()
 
 if UHID_AVAILABLE:
     from fido2_hid_bridge.backends import (
