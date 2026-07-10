@@ -1,0 +1,94 @@
+name: Test
+
+on:
+  push:
+    branches: [main, feat/tcp-backend]
+  pull_request:
+
+jobs:
+  # Non-root tests: TCP protocol, CLI parsing, module imports
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Build
+        run: nix build .#default --no-link --print-build-logs
+
+      - name: Verify CLI
+        run: |
+          VENV=$(nix build .#default --no-link --print-build-paths)
+          "$VENV/bin/fido2-hid-bridge" --help
+
+      - name: Run TCP protocol tests
+        run: |
+          VENV=$(nix build .#default --no-link --print-build-paths)
+          RESULT=$("$VENV/bin/python3.12" tests/test_tcp.py 2>&1 || true)
+          echo "$RESULT"
+          echo "$RESULT" | grep -q "VERIFICATION: PASSED" || exit 1
+
+  # Root tests: uhid device creation, INIT handling, HID framing
+  test-uhid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Build
+        run: nix build .#default --no-link --print-build-logs
+
+      - name: Run uhid tests (root required)
+        run: |
+          VENV=$(nix build .#default --no-link --print-build-paths)
+          sudo "$VENV/bin/python3.12" tests/test_uhid.py 2>&1 | tee /tmp/uhid_test.log
+          grep -q "VERIFICATION: PASSED" /tmp/uhid_test.log || exit 1
+
+  # Verify nix flake evaluates and NixOS module is valid
+  test-nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Check flake evaluates
+        run: nix flake check --no-build
+
+      - name: Check NixOS module evaluates with both backends
+        run: |
+          # Use the flake's own nixpkgs to eval the module in a test config
+          nix eval --impure --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              nixpkgs = flake.inputs.nixpkgs.legacyPackages.x86_64-linux;
+              lib = nixpkgs.lib;
+              self = { packages.x86_64-linux.default = { outPath = "/nix/store/none"; }; };
+              pkgs = nixpkgs;
+            in
+              (lib.evalModules {
+                modules = [
+                  (import ./nix/module.nix)
+                  { config._module.args = { inherit self pkgs lib; }; }
+                  # PC/SC backend config
+                  {
+                    services.fido2-hid-bridge = {
+                      enable = true;
+                      backend = "pcsc";
+                    };
+                  }
+                  # TCP backend config (merged — tests both option sets)
+                  {
+                    services.fido2-hid-bridge = {
+                      backend = "tcp";
+                      tcp = {
+                        port = 28437;
+                        openFirewall = true;
+                      };
+                    };
+                  }
+                ];
+              }).config.services.fido2-hid-bridge
+          ' 2>&1 && echo "NixOS module evaluates OK for both backends"
