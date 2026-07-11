@@ -144,17 +144,15 @@ MSG_ERROR = 0xFF          # Either direction: transport error
 class TcpRemoteBackend(AuthenticatorBackend):
     """Remote authenticator backend over TCP.
 
-    Listens for a phone connection, then bridges CTAP2 CBOR payloads
-    between the bridge and the phone (which relays them to an NFC dongle).
+    Supports an arbitrary number of simultaneous phone connections.
+    When a CTAP request arrives, it's sent to all phones that report
+    an NFC dongle present. The first response wins; the rest are ignored.
     """
 
     def __init__(self, host: str = "0.0.0.0", port: int = 28437):
         self._host = host
         self._port = port
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-        self._connected = False
-        self._pending_future: Optional[asyncio.Future] = None
+        self._phones: dict[asyncio.Task, _PhoneConnection] = {}
 
     async def start_server(self):
         """Start listening for phone connections."""
@@ -162,108 +160,145 @@ class TcpRemoteBackend(AuthenticatorBackend):
             self._on_connect, self._host, self._port
         )
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-        logging.info(f"Listening for phone on {addrs}")
+        logging.info(f"Listening for phones on {addrs}")
         return server
 
     async def _on_connect(self, reader, writer):
-        if self._connected:
-            logging.info("Phone reconnecting, closing old connection")
-            self.close()
         peer = writer.get_extra_info('peername')
         logging.info(f"Phone connected from {peer}")
-        self._reader = reader
-        self._writer = writer
-        self._connected = True
-        asyncio.ensure_future(self._read_loop())
+        phone = _PhoneConnection(reader, writer, peer)
+        task = asyncio.ensure_future(self._read_loop(phone, task=None))
+        # Set the task ref so the read loop can self-clean
+        task._phone = phone  # type: ignore
+        self._phones[task] = phone
 
-    async def _read_loop(self):
-        """Continuously read messages from the phone."""
+    async def _read_loop(self, phone: '_PhoneConnection', task=None):
+        """Continuously read messages from one phone."""
         try:
-            while self._connected:
-                header = await self._reader.readexactly(4)
+            while True:
+                header = await phone.reader.readexactly(4)
                 total_len = struct.unpack('>I', header)[0]
-                body = await self._reader.readexactly(total_len)
+                body = await phone.reader.readexactly(total_len)
                 msg_type = body[0]
                 payload = body[1:]
 
                 if msg_type == MSG_HELLO:
                     version = payload[0] if payload else 0
-                    logging.info(f"Phone hello v{version}")
-                    await self._send_message(MSG_HELLO_ACK, bytes([1]))
+                    logging.info(f"Phone {phone.peer} hello v{version}")
+                    await phone.send(MSG_HELLO_ACK, bytes([1]))
 
                 elif msg_type == MSG_CTAP_RESPONSE:
-                    if self._pending_future and not self._pending_future.done():
-                        self._pending_future.set_result(payload)
+                    if phone.pending and not phone.pending.done():
+                        phone.pending.set_result(payload)
                     else:
-                        logging.warning("Got CTAP_RESPONSE with no pending request")
+                        logging.warning(f"Phone {phone.peer} CTAP_RESPONSE with no pending request")
 
                 elif msg_type == MSG_NFC_STATUS:
                     present = payload[0] if payload else 0
-                    logging.info(f"NFC status: present={bool(present)}")
+                    phone.nfc_present = bool(present)
+                    logging.info(f"Phone {phone.peer} NFC status: present={bool(present)}")
 
                 elif msg_type == MSG_ERROR:
-                    logging.error(f"Phone error: {payload}")
-                    if self._pending_future and not self._pending_future.done():
-                        self._pending_future.set_exception(
+                    logging.error(f"Phone {phone.peer} error: {payload}")
+                    if phone.pending and not phone.pending.done():
+                        phone.pending.set_exception(
                             RuntimeError(f"Phone error: {payload}")
                         )
 
                 else:
-                    logging.warning(f"Unknown message type from phone: {msg_type:#x}")
+                    logging.warning(f"Phone {phone.peer} unknown msg type: {msg_type:#x}")
 
         except asyncio.IncompleteReadError:
-            logging.info("Phone disconnected")
+            logging.info(f"Phone {phone.peer} disconnected")
         except Exception as e:
-            logging.error(f"Read loop error: {e}")
+            logging.error(f"Read loop error for {phone.peer}: {e}")
         finally:
-            self._connected = False
-            self._reader = None
-            self._writer = None
-            if self._pending_future and not self._pending_future.done():
-                self._pending_future.set_exception(
-                    RuntimeError("Phone disconnected")
+            phone.close()
+            # Clean up the task entry
+            for t, p in list(self._phones.items()):
+                if p is phone:
+                    del self._phones[t]
+                    break
+            if phone.pending and not phone.pending.done():
+                phone.pending.set_exception(
+                    RuntimeError(f"Phone {phone.peer} disconnected")
                 )
 
     async def wait_for_device(self) -> bool:
-        # For TCP, "device available" means "phone connected"
-        if self._connected:
+        # "device available" = at least one phone connected with NFC present
+        if any(p.nfc_present for p in self._phones.values()):
             return True
-        # Wait up to the timeout for a phone to connect
+        # Wait up to the timeout for a phone to connect and tap a dongle
         start = time.time()
         while time.time() < start + SECONDS_TO_WAIT_FOR_AUTHENTICATOR:
-            if self._connected:
+            if any(p.nfc_present for p in self._phones.values()):
                 return True
             await asyncio.sleep(0.1)
         return False
 
     async def send_ctap(self, cbor_payload: bytes) -> Optional[bytes]:
-        if not self._connected or self._writer is None:
+        # Find all phones with NFC present
+        ready = [p for p in self._phones.values() if p.nfc_present]
+        if not ready:
+            # Fall back to any connected phone (might not have reported NFC yet)
+            ready = list(self._phones.values())
+        if not ready:
             return None
 
         loop = asyncio.get_event_loop()
-        self._pending_future = loop.create_future()
 
-        await self._send_message(MSG_CTAP_REQUEST, cbor_payload)
+        # Send to all ready phones, collect their response futures
+        futures = []
+        for phone in ready:
+            phone.pending = loop.create_future()
+            futures.append(phone.pending)
+            await phone.send(MSG_CTAP_REQUEST, cbor_payload)
+            logging.debug(f"Sent CTAP request to {phone.peer}")
 
-        try:
-            return await asyncio.wait_for(self._pending_future, timeout=30.0)
-        except asyncio.TimeoutError:
-            logging.error("Timeout waiting for phone response")
-            return None
+        # Wait for the first response
+        done, pending = await asyncio.wait(
+            futures,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=30.0,
+        )
 
-    async def _send_message(self, msg_type: int, payload: bytes):
-        if self._writer is None:
-            return
-        msg = struct.pack('>I', 1 + len(payload)) + bytes([msg_type]) + payload
-        self._writer.write(msg)
-        await self._writer.drain()
+        # Cancel any pending requests on other phones
+        for f in pending:
+            f.cancel()
+
+        for f in done:
+            if f.exception() is None:
+                return f.result()
+
+        logging.error("All phones failed or timed out")
+        return None
 
     def close(self):
-        if self._writer is not None:
-            self._writer.close()
-        self._connected = False
-        self._reader = None
-        self._writer = None
+        for phone in list(self._phones.values()):
+            phone.close()
+        self._phones.clear()
 
     def capabilities(self) -> int:
         return 0x04 | 0x08  # CBOR + NMSG (no legacy U2F)
+
+
+class _PhoneConnection:
+    """Represents a single phone connection."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str):
+        self.reader = reader
+        self.writer = writer
+        self.peer = peer
+        self.nfc_present = False
+        self.pending: Optional[asyncio.Future] = None
+
+    async def send(self, msg_type: int, payload: bytes):
+        msg = struct.pack('>I', 1 + len(payload)) + bytes([msg_type]) + payload
+        self.writer.write(msg)
+        await self.writer.drain()
+
+    def close(self):
+        try:
+            self.writer.close()
+        except Exception:
+            pass
