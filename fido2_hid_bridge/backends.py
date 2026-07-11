@@ -225,23 +225,22 @@ class TcpRemoteBackend(AuthenticatorBackend):
                 )
 
     async def wait_for_device(self) -> bool:
-        # "device available" = at least one phone connected with NFC present
-        if any(p.nfc_present for p in self._phones.values()):
+        # "device available" = at least one phone connected.
+        # The phone will hold the request and wait for an NFC tap.
+        if self._phones:
             return True
-        # Wait up to the timeout for a phone to connect and tap a dongle
+        # Wait up to the timeout for a phone to connect
         start = time.time()
         while time.time() < start + SECONDS_TO_WAIT_FOR_AUTHENTICATOR:
-            if any(p.nfc_present for p in self._phones.values()):
+            if self._phones:
                 return True
             await asyncio.sleep(0.1)
         return False
 
     async def send_ctap(self, cbor_payload: bytes) -> Optional[bytes]:
-        # Find all phones with NFC present
-        ready = [p for p in self._phones.values() if p.nfc_present]
-        if not ready:
-            # Fall back to any connected phone (might not have reported NFC yet)
-            ready = list(self._phones.values())
+        # Send to all connected phones — the phone holds the request
+        # and waits for an NFC tap before responding.
+        ready = list(self._phones.values())
         if not ready:
             return None
 
@@ -255,11 +254,11 @@ class TcpRemoteBackend(AuthenticatorBackend):
             await phone.send(MSG_CTAP_REQUEST, cbor_payload)
             logging.debug(f"Sent CTAP request to {phone.peer}")
 
-        # Wait for the first response
+        # Wait for the first response (generous timeout for NFC tap)
         done, pending = await asyncio.wait(
             futures,
             return_when=asyncio.FIRST_COMPLETED,
-            timeout=30.0,
+            timeout=60.0,
         )
 
         # Cancel any pending requests on other phones
