@@ -123,6 +123,9 @@
         }
       );
 
-      nixosModules.default = import ./nix/module.nix;
+      nixosModules.default = { pkgs, ... }: {
+        imports = [ (import ./nix/module.nix) ];
+        services.fido2-hid-bridge.package = self.packages.${pkgs.system}.default;
+      };
     };
 }

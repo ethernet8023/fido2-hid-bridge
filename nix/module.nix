@@ -2,15 +2,25 @@
   config,
   lib,
   pkgs,
-  self,
   ...
 }:
 let
   cfg = config.services.fido2-hid-bridge;
+  # The package is provided by the flake that owns this module.
+  # When imported via nixosModules.default, the flake's packages are
+  # accessible through pkgs if overlaid, or we fall back to the
+  # _module.args.self pattern. Since we can't rely on self being
+  # passed, we use an option with no default that the caller must set.
+  bridgePkg = config.services.fido2-hid-bridge.package;
 in
 {
   options.services.fido2-hid-bridge = {
     enable = lib.mkEnableOption "the fido2-hid-bridge service";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      description = "The fido2-hid-bridge package (from the flake).";
+    };
 
     backend = lib.mkOption {
       type = lib.types.enum [
@@ -62,9 +72,9 @@ in
         Type = "simple";
         ExecStart =
           if cfg.backend == "tcp" then
-            "${self.packages.${pkgs.system}.default}/bin/fido2-hid-bridge --backend tcp --port ${toString cfg.tcp.port}"
+            "${bridgePkg}/bin/fido2-hid-bridge --backend tcp --port ${toString cfg.tcp.port}"
           else
-            "${self.packages.${pkgs.system}.default}/bin/fido2-hid-bridge";
+            "${bridgePkg}/bin/fido2-hid-bridge";
       };
     };
   };
