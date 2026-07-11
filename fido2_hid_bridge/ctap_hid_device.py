@@ -119,9 +119,11 @@ class CTAPHIDDevice:
         if self.reference_count > 0:
             self.reference_count -= 1
         if self.reference_count == 0:
-            # Clear all state
+            # Clear channel state but keep phone connections alive.
+            # Only PC/SC needs device close on uhid close.
             self.channels_to_state = {}
-            self.backend.close()
+            if hasattr(self.backend, '_device'):  # PcscBackend
+                self.backend.close()
 
     def process_hid_message(self, buffer: List[int], report_type: _ReportType) -> None:
         """Core method: handle incoming HID messages."""
