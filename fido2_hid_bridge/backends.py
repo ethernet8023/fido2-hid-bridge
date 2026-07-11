@@ -167,9 +167,8 @@ class TcpRemoteBackend(AuthenticatorBackend):
 
     async def _on_connect(self, reader, writer):
         if self._connected:
-            logging.warning("Phone already connected, rejecting new connection")
-            writer.close()
-            return
+            logging.info("Phone reconnecting, closing old connection")
+            self.close()
         peer = writer.get_extra_info('peername')
         logging.info(f"Phone connected from {peer}")
         self._reader = reader
